@@ -1,0 +1,202 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import RobustScaler
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.metrics import (
+    confusion_matrix, ConfusionMatrixDisplay, accuracy_score,
+    precision_score, recall_score, f1_score, roc_auc_score, roc_curve
+)
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+import random
+import matplotlib.pyplot as plt
+import xgboost as xgb
+import warnings
+warnings.filterwarnings("ignore")
+
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import os
+
+PLOT_DIR = "/content/plots_no_ga/"
+os.makedirs(PLOT_DIR, exist_ok=True)
+
+def save_plot(filename):
+    plt.savefig(os.path.join(PLOT_DIR, filename), dpi=300, bbox_inches='tight')
+    plt.close()
+
+df = pd.read_csv('/content/All_subjects_segments60.csv')
+
+drop_cols = ['Subject_ID','ApEn','scope','segment','SubjectID','SubjectName']
+df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+
+df['label'] = df['condition'].map({
+    'Baseline': 0, 'Recovery': 0,
+    'Stroop': 1, 'MAT': 1
+})
+df = df.drop(columns=['condition'], errors='ignore')
+
+time_domain = [
+    "AVNN_ms","MEDIAN_RR_ms","SDNN_ms","RMSSD_ms","SDSD_ms",
+    "NN20","pNN20_pct","NN50","pNN50_pct",
+    "HR_mean_bpm","HR_std_bpm","HR_median_bpm",
+    "IQR_RR_ms","MAD_RR_ms","CVNN","CVSD"
+]
+
+frequency_domain = [
+    "VLF_ms2","LF_ms2","HF_ms2","TP_ms2",
+    "LF_nu","HF_nu","LF_HF","HF_LF",
+    "lnLF","lnHF","lnTP",
+    "VLF_pct","LF_pct","HF_pct",
+    "fpeak_LF","fpeak_HF","fc_LF","fc_HF"
+]
+
+nonlinear = [
+    "SD1_ms","SD2_ms","SD1_SD2_ratio",
+    "SampEn","HiguchiFD","KURT"
+]
+
+other_features = ["N","SKEW","TI"]
+
+time_domain = [c for c in time_domain if c in df.columns]
+frequency_domain = [c for c in frequency_domain if c in df.columns]
+nonlinear = [c for c in nonlinear if c in df.columns]
+other_features = [c for c in other_features if c in df.columns]
+
+all_expected_features = time_domain + frequency_domain + nonlinear + other_features
+
+print("\n=== FINAL FEATURE CATEGORY COUNTS ===")
+print("Time-domain:", len(time_domain))
+print("Frequency-domain:", len(frequency_domain))
+print("Nonlinear:", len(nonlinear))
+print("Other:", len(other_features))
+print("Total categorized features:", len(all_expected_features))
+
+X = df.drop(columns=['label'])
+y = df['label'].astype(int)
+
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.20, stratify=y, random_state=42
+)
+
+print(f"Train shape: {X_train_raw.shape}, Test shape: {X_test_raw.shape}")
+
+imputer = SimpleImputer(strategy='median')
+X_train_imp = pd.DataFrame(imputer.fit_transform(X_train_raw), columns=X.columns)
+X_test_imp = pd.DataFrame(imputer.transform(X_test_raw), columns=X.columns)
+
+skewness = X_train_imp.skew(numeric_only=True)
+skewed_cols = skewness[skewness.abs() > 1].index.tolist()
+print("Detected skewed columns:", skewed_cols)
+
+def sign_log1p_train_apply(train_series, test_series):
+    tr = train_series.copy()
+    te = test_series.copy()
+    tr_trans = np.sign(tr) * np.log1p(np.abs(tr))
+    te_trans = np.sign(te) * np.log1p(np.abs(te))
+    return tr_trans, te_trans
+
+for col in skewed_cols:
+    if col in X_train_imp.columns:
+        tr_col, te_col = sign_log1p_train_apply(
+            X_train_imp[col].astype(float),
+            X_test_imp[col].astype(float)
+        )
+        X_train_imp[col] = tr_col
+        X_test_imp[col] = te_col
+
+scaler = RobustScaler()
+X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train_imp), columns=X.columns)
+X_test_scaled = pd.DataFrame(scaler.transform(X_test_imp), columns=X.columns)
+
+selected_features = X_train_scaled.columns.tolist()
+X_train_sel = X_train_scaled.values
+X_test_sel = X_test_scaled.values
+
+classifiers = {
+    "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
+    "KNN": KNeighborsClassifier(),
+    "SVM": SVC(kernel='rbf', probability=True, random_state=42),
+    "Logistic": LogisticRegression(max_iter=600, random_state=42),
+    "XGBoost": xgb.XGBClassifier(
+        n_estimators=200, max_depth=3, learning_rate=0.1,
+        subsample=0.8, colsample_bytree=0.8,
+        eval_metric='logloss', use_label_encoder=False, random_state=42
+    ),
+    "MLP": MLPClassifier(hidden_layer_sizes=(20,), max_iter=600, random_state=42)
+}
+
+results = []
+fitted_classifiers = {}
+
+for name, clf in classifiers.items():
+    print(f"\n===================== {name} =====================")
+    clf.fit(X_train_sel, y_train)
+    fitted_classifiers[name] = clf
+
+    y_pred = clf.predict(X_test_sel)
+    y_prob = clf.predict_proba(X_test_sel)[:, 1] if hasattr(clf, "predict_proba") else None
+
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, zero_division=0)
+    rec = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    auc = roc_auc_score(y_test, y_prob) if y_prob is not None else float("nan")
+
+    print(f"Accuracy : {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall   : {rec:.4f}")
+    print(f"F1 Score : {f1:.4f}")
+    print(f"AUC      : {auc:.4f}")
+
+    cm = confusion_matrix(y_test, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot(cmap='Blues')
+    plt.title(f"{name} - Test Confusion Matrix")
+    plt.show()
+
+    results.append({
+        "Model": name,
+        "Accuracy": acc,
+        "Precision": prec,
+        "Recall": rec,
+        "F1 Score": f1,
+        "AUC": auc
+    })
+
+df_res = pd.DataFrame(results)
+print("\n=================== FINAL TEST RESULTS ===================")
+print(df_res)
+
+plt.figure(figsize=(8,6))
+for name, clf in fitted_classifiers.items():
+    if hasattr(clf, "predict_proba"):
+        probs = clf.predict_proba(X_test_sel)[:, 1]
+        fpr, tpr, _ = roc_curve(y_test, probs)
+        plt.plot(fpr, tpr, label=f"{name} AUC={roc_auc_score(y_test, probs):.3f}")
+
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel("FPR")
+plt.ylabel("TPR")
+plt.title("ROC Comparison")
+plt.legend()
+plt.grid(True)
+save_plot("roc_curve_overlay.png")
+
+pca = PCA(n_components=2, random_state=42)
+pca_vis = pca.fit_transform(X_train_sel)
+plt.figure(figsize=(7,5))
+plt.scatter(pca_vis[:,0], pca_vis[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("PCA Projection (All Features)")
+save_plot("pca_all_features.png")
+
+tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
+tsne_vis = tsne.fit_transform(X_train_sel)
+plt.figure(figsize=(7,5))
+plt.scatter(tsne_vis[:,0], tsne_vis[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("t-SNE Projection (All Features)")
+save_plot("tsne_all_features.png")
