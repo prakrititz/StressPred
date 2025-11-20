@@ -1,0 +1,379 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import RobustScaler
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.metrics import (
+    confusion_matrix, ConfusionMatrixDisplay, accuracy_score,
+    precision_score, recall_score, f1_score, roc_auc_score, roc_curve
+)
+
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from deap import base, creator, tools, algorithms
+import random
+import matplotlib.pyplot as plt
+import xgboost as xgb
+import warnings
+warnings.filterwarnings("ignore")
+
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import os
+import zipfile
+from google.colab import files
+
+PLOT_DIR = "/content/ga_plots/"
+os.makedirs(PLOT_DIR, exist_ok=True)
+
+def save_plot(filename):
+    """Save current matplotlib figure into the plot folder."""
+    plt.savefig(os.path.join(PLOT_DIR, filename), dpi=300, bbox_inches='tight')
+    plt.close()
+
+df = pd.read_csv('/content/All_subjects_segments60.csv')
+
+drop_cols = ['Subject_ID','ApEn','scope','segment','SubjectID','SubjectName']
+df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+
+df['label'] = df['condition'].map({
+    'Baseline': 0, 'Recovery': 0,
+    'Stroop': 1, 'MAT': 1
+})
+df = df.drop(columns=['condition'], errors='ignore')
+
+time_domain = [
+    "AVNN_ms", "MEDIAN_RR_ms", "SDNN_ms", "RMSSD_ms", "SDSD_ms",
+    "NN20", "pNN20_pct", "NN50", "pNN50_pct",
+    "HR_mean_bpm", "HR_std_bpm", "HR_median_bpm",
+    "IQR_RR_ms", "MAD_RR_ms", "CVNN", "CVSD"
+]
+
+frequency_domain = [
+    "VLF_ms2", "LF_ms2", "HF_ms2", "TP_ms2",
+    "LF_nu", "HF_nu", "LF_HF", "HF_LF",
+    "lnLF", "lnHF", "lnTP",
+    "VLF_pct", "LF_pct", "HF_pct",
+    "fpeak_LF", "fpeak_HF", "fc_LF", "fc_HF"
+]
+
+nonlinear = [
+    "SD1_ms", "SD2_ms", "SD1_SD2_ratio",
+    "SampEn", "HiguchiFD", "KURT"
+]
+
+other_features = ["N", "SKEW", "TI"]
+
+time_domain = [c for c in time_domain if c in df.columns]
+frequency_domain = [c for c in frequency_domain if c in df.columns]
+nonlinear = [c for c in nonlinear if c in df.columns]
+other_features = [c for c in other_features if c in df.columns]
+
+print("\n=== FINAL FEATURE CATEGORY COUNTS ===")
+print("Time-domain:", len(time_domain))
+print("Frequency-domain:", len(frequency_domain))
+print("Nonlinear:", len(nonlinear))
+print("Other:", len(other_features))
+
+all_expected_features = time_domain + frequency_domain + nonlinear + other_features
+print("Total categorized features:", len(all_expected_features))
+
+X = df.drop(columns=['label'])
+y = df['label'].astype(int)
+
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.20, stratify=y, random_state=42
+)
+
+print(f"Train shape: {X_train_raw.shape}, Test shape: {X_test_raw.shape}")
+
+imputer = SimpleImputer(strategy='median')
+X_train_imp = pd.DataFrame(imputer.fit_transform(X_train_raw), columns=X.columns)
+X_test_imp = pd.DataFrame(imputer.transform(X_test_raw), columns=X.columns)
+
+skewness = X_train_imp.skew(numeric_only=True)
+skewed_cols = skewness[skewness.abs() > 1].index.tolist()
+print("Detected skewed columns (|skew| > 1):", skewed_cols)
+
+def sign_log1p_train_apply(train_series, test_series):
+    tr = train_series.copy()
+    te = test_series.copy()
+    tr_trans = np.sign(tr) * np.log1p(np.abs(tr))
+    te_trans = np.sign(te) * np.log1p(np.abs(te))
+    return tr_trans, te_trans
+
+for col in skewed_cols:
+    if col in X_train_imp.columns:
+        tr_col, te_col = sign_log1p_train_apply(X_train_imp[col].astype(float), X_test_imp[col].astype(float))
+        X_train_imp[col] = tr_col
+        X_test_imp[col] = te_col
+
+scaler = RobustScaler()
+X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train_imp), columns=X.columns)
+X_test_scaled = pd.DataFrame(scaler.transform(X_test_imp), columns=X.columns)
+
+X_full = X_train_scaled.copy()
+n_features = X_full.shape[1]
+
+if "FitnessMax" in creator.__dict__:
+    del creator.FitnessMax
+if "Individual" in creator.__dict__:
+    del creator.Individual
+
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMax)
+
+toolbox = base.Toolbox()
+toolbox.register("attr_bool", random.randint, 0, 1)
+toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_bool, n=n_features)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+def eval_individual(individual):
+    if sum(individual) == 0:
+        return 0.0,
+    selected_cols = [X_full.columns[i] for i in range(n_features) if individual[i] == 1]
+    clf = RandomForestClassifier(n_estimators=150, random_state=42)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    scores = cross_val_score(clf, X_full[selected_cols].values, y_train, cv=cv, scoring='accuracy', n_jobs=1)
+    return scores.mean(),
+
+toolbox.register("evaluate", eval_individual)
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", tools.mutFlipBit, indpb=0.15)
+toolbox.register("select", tools.selTournament, tournsize=3)
+
+pop = toolbox.population(n=60)
+hof_main = tools.HallOfFame(1)
+NGEN = 20
+
+best_train_fitness = []
+avg_fitness = []
+median_fitness = []
+worst_fitness = []
+best_test_accuracy = []
+population_diversity = []
+feature_selection_history = []
+feature_frequency_population = np.zeros(n_features, dtype=int)
+
+for gen in range(NGEN):
+    offspring = algorithms.varAnd(pop, toolbox, cxpb=0.6, mutpb=0.3)
+    fits = list(map(toolbox.evaluate, offspring))
+    for ind, fit in zip(offspring, fits):
+        ind.fitness.values = fit
+
+    pop = toolbox.select(offspring, len(pop))
+    hof_main.update(pop)
+
+    fitness_values = [ind.fitness.values[0] for ind in pop]
+    best_ind = hof_main[0]
+    best_fit = best_ind.fitness.values[0]
+
+    best_train_fitness.append(best_fit)
+    avg_fitness.append(np.mean(fitness_values))
+    median_fitness.append(np.median(fitness_values))
+    worst_fitness.append(np.min(fitness_values))
+
+    pop_matrix = np.array([np.array(ind, dtype=int) for ind in pop])
+    pop_size = len(pop_matrix)
+
+    if pop_size > 1:
+        d = []
+        for i in range(pop_size):
+            for j in range(i+1, pop_size):
+                d.append(np.sum(pop_matrix[i] != pop_matrix[j]) / n_features)
+        population_diversity.append(np.mean(d))
+    else:
+        population_diversity.append(0)
+
+    feature_frequency_population += pop_matrix.sum(axis=0)
+
+    chosen_cols = [X_full.columns[i] for i in range(n_features) if best_ind[i] == 1]
+    if len(chosen_cols) == 0:
+        chosen_cols = X_full.columns.tolist()
+
+    Xtr_sel = X_train_scaled[chosen_cols].values
+    Xte_sel = X_test_scaled[chosen_cols].values
+
+    rf_tmp = RandomForestClassifier(n_estimators=150, random_state=42)
+    rf_tmp.fit(Xtr_sel, y_train)
+    y_pred_test = rf_tmp.predict(Xte_sel)
+    best_test_accuracy.append(accuracy_score(y_test, y_pred_test))
+
+    print(f"Gen {gen+1}/{NGEN} | Best = {best_fit:.4f} | Avg = {avg_fitness[-1]:.4f} | Med = {median_fitness[-1]:.4f} | Worst = {worst_fitness[-1]:.4f}")
+
+best_ind = hof_main[0]
+selected_features = [X_full.columns[i] for i in range(n_features) if best_ind[i] == 1]
+print("\nSelected GA Features:")
+print(selected_features if selected_features else "None → Using all.")
+if len(selected_features) == 0:
+    selected_features = X_full.columns.tolist()
+
+X_train_sel = X_train_scaled[selected_features].values
+X_test_sel  = X_test_scaled[selected_features].values
+
+classifiers = {
+    "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
+    "KNN": KNeighborsClassifier(),
+    "SVM": SVC(kernel='rbf', probability=True, random_state=42),
+    "Logistic": LogisticRegression(max_iter=600, random_state=42),
+    "XGBoost": xgb.XGBClassifier(
+        n_estimators=200, max_depth=3, learning_rate=0.1,
+        subsample=0.8, colsample_bytree=0.8,
+        eval_metric='logloss', use_label_encoder=False, random_state=42
+    ),
+    "MLP": MLPClassifier(hidden_layer_sizes=(20,), max_iter=600, random_state=42)
+}
+
+results = []
+fitted_classifiers = {}
+
+for name, clf in classifiers.items():
+    print(f"\n===================== {name} =====================")
+    clf.fit(X_train_sel, y_train)
+    fitted_classifiers[name] = clf
+
+    y_pred = clf.predict(X_test_sel)
+    y_prob = clf.predict_proba(X_test_sel)[:, 1] if hasattr(clf, "predict_proba") else None
+
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, zero_division=0)
+    rec = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    auc = roc_auc_score(y_test, y_prob) if y_prob is not None else float("nan")
+
+    print(f"Accuracy : {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall   : {rec:.4f}")
+    print(f"F1 Score : {f1:.4f}")
+    print(f"AUC      : {auc:.4f}")
+
+    cm = confusion_matrix(y_test, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    disp.plot(cmap='Blues')
+    plt.title(f"{name} - Test Confusion Matrix")
+    plt.show()
+
+    results.append({
+        "Model": name,
+        "Accuracy": acc,
+        "Precision": prec,
+        "Recall": rec,
+        "F1 Score": f1,
+        "AUC": auc
+    })
+
+df_res = pd.DataFrame(results)
+print("\n=================== FINAL TEST RESULTS (20% UNSEEN) ===================")
+print(df_res)
+
+plt.figure(figsize=(8,6))
+plt.plot(best_train_fitness, marker='o', label="Best")
+plt.plot(avg_fitness, marker='s', label="Average")
+plt.plot(median_fitness, marker='^', label="Median")
+plt.plot(worst_fitness, marker='x', label="Worst")
+plt.title("GA Convergence (Fitness Evolution)")
+plt.xlabel("Generation")
+plt.ylabel("Fitness")
+plt.grid(True)
+plt.legend()
+save_plot("ga_convergence_curve.png")
+
+plt.figure(figsize=(7,5))
+plt.plot(best_train_fitness, marker='o', label="Train CV Accuracy")
+plt.plot(best_test_accuracy, marker='s', label="Test Accuracy")
+plt.title("Train vs Test Accuracy (GA)")
+plt.xlabel("Generation")
+plt.ylabel("Accuracy")
+plt.grid(True)
+plt.legend()
+save_plot("train_vs_test_accuracy.png")
+
+plt.figure(figsize=(7,5))
+plt.plot(population_diversity, marker='o')
+plt.title("Population Diversity Curve")
+plt.xlabel("Generation")
+plt.ylabel("Avg Hamming Distance")
+plt.grid(True)
+save_plot("population_diversity.png")
+
+feature_freq_series = pd.Series(feature_frequency_population, index=X_full.columns)
+time_present = [c for c in time_domain if c in feature_freq_series.index]
+freq_present = [c for c in frequency_domain if c in feature_freq_series.index]
+nl_present   = [c for c in nonlinear if c in feature_freq_series.index]
+ga_selected_set = set(selected_features)
+
+def make_colors(feature_list):
+    return ["tab:blue" if feat in ga_selected_set else "lightgray" for feat in feature_list]
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 16), constrained_layout=True)
+
+colors = ["tab:blue" if f in selected_features else "lightgray" for f in time_present]
+axes[0].bar(time_present, feature_freq_series.loc[time_present].values, color=colors)
+axes[0].set_title("GA Feature Frequency — Time-domain")
+axes[0].tick_params(axis='x', rotation=90)
+
+colors = ["tab:blue" if f in selected_features else "lightgray" for f in freq_present]
+axes[1].bar(freq_present, feature_freq_series.loc[freq_present].values, color=colors)
+axes[1].set_title("GA Feature Frequency — Frequency-domain")
+axes[1].tick_params(axis='x', rotation=90)
+
+colors = ["tab:blue" if f in selected_features else "lightgray" for f in nl_present]
+axes[2].bar(nl_present, feature_freq_series.loc[nl_present].values, color=colors)
+axes[2].set_title("GA Feature Frequency — Nonlinear")
+axes[2].tick_params(axis='x', rotation=90)
+
+save_plot("ga_feature_frequencies.png")
+
+plt.figure(figsize=(8,6))
+for name, clf in fitted_classifiers.items():
+    if hasattr(clf, "predict_proba"):
+        probs = clf.predict_proba(X_test_sel)[:, 1]
+        fpr, tpr, _ = roc_curve(y_test, probs)
+        plt.plot(fpr, tpr, label=f"{name} AUC={roc_auc_score(y_test, probs):.3f}")
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel("FPR")
+plt.ylabel("TPR")
+plt.title("ROC Comparison")
+plt.legend()
+plt.grid(True)
+save_plot("roc_curve_overlay.png")
+
+pca = PCA(n_components=2, random_state=42)
+pca_before = pca.fit_transform(X_train_scaled.values)
+plt.figure(figsize=(7,5))
+plt.scatter(pca_before[:,0], pca_before[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("PCA - Before GA")
+save_plot("pca_before_ga.png")
+
+pca_after = PCA(n_components=2, random_state=42).fit_transform(X_train_sel)
+plt.figure(figsize=(7,5))
+plt.scatter(pca_after[:,0], pca_after[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("PCA - After GA")
+save_plot("pca_after_ga.png")
+
+tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
+tsne_before = tsne.fit_transform(X_train_scaled.values)
+plt.figure(figsize=(7,5))
+plt.scatter(tsne_before[:,0], tsne_before[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("t-SNE - Before GA")
+save_plot("tsne_before_ga.png")
+
+tsne_after = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
+tsne_after = tsne_after.fit_transform(X_train_sel)
+plt.figure(figsize=(7,5))
+plt.scatter(tsne_after[:,0], tsne_after[:,1], c=y_train, cmap='coolwarm', s=10)
+plt.title("t-SNE - After GA")
+save_plot("tsne_after_ga.png")
+
+zip_path = "/content/GA_PLOTS.zip"
+
+with zipfile.ZipFile(zip_path, "w") as zf:
+    for root, _, files in os.walk(PLOT_DIR):
+        for f in files:
+            zf.write(os.path.join(root, f), arcname=f)
+
+files.download(zip_path)
+print("Download ready:", zip_path)
