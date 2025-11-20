@@ -1,8 +1,10 @@
 """
 CNN + Transformer + FiLM HRV Fusion for ECG Stress Classification
 
-Overview:
-- Loads multi-subject ECG recordings (expects 'baseline' and 'stroop' conditions).
+Updated Overview (Stress vs Non-Stress):
+- Conditions treated as NON-STRESS: baseline, recovery  (label 0)
+- Conditions treated as STRESS: mat, stroop            (label 1)
+- Loads multi-subject ECG recordings (expects any subset of: baseline / recovery / mat / stroop).
 - Segments signals into overlapping fixed-length windows.
 - Extracts 41 HRV features per segment (time / frequency / nonlinear).
 - CNN encoder -> Transformer encoder -> mean pooling.
@@ -14,17 +16,20 @@ Overview:
 Directory layout expected:
 DATA_ROOT/
   └── <SubjectID>/
-      ├── baseline/baseline_reconstructed.csv
-      └── stroop/stroop_reconstructed.csv
+      ├── baseline/baseline_reconstructed.csv    (optional)
+      ├── recovery/recovery_reconstructed.csv    (optional)
+      ├── mat/mat_reconstructed.csv              (optional)
+      └── stroop/stroop_reconstructed.csv        (optional)
+
+Label Mapping:
+  baseline -> 0 (non-stress)
+  recovery -> 0 (non-stress)
+  mat      -> 1 (stress)
+  stroop   -> 1 (stress)
 
 Run:
   pip install numpy pandas torch scikit-learn scipy matplotlib psutil
-  python 1dD-CNN_transformerALL.py
-
-Notes:
-- SAMPLE_RATE must match your recording hardware (e.g., 130 Hz).
-- SEGMENT_LEN defines window length (SEGMENT_LEN/SAMPLE_RATE seconds).
-- NUM_HRV_FEATURES must match compute_hrv_features output length.
+  python CNN_TransformerHRV.py
 """
 
 import os
@@ -71,20 +76,22 @@ process = psutil.Process(os.getpid())
 # -----------------------
 def load_all_subjects(root):
     """
-    Scan dataset root for subject folders and load ECG signals for 'baseline' and 'stroop'.
+    Scan dataset root for subject folders and load ECG signals for supported conditions.
 
-    Args:
-        root: Path to dataset root.
+    Conditions:
+        Non-stress: baseline, recovery
+        Stress:     mat, stroop
 
     Returns:
         List of tuples (subject_id, condition, ecg_signal_1d_np).
     """
+    valid_conditions = {"baseline", "recovery", "mat", "stroop"}
     records = []
     for subj in sorted(glob(os.path.join(root, "*"))):
         sid = os.path.basename(subj)
         for cond in sorted(glob(os.path.join(subj, "*"))):
             cname = os.path.basename(cond).lower()
-            if cname not in ["baseline", "stroop"]:
+            if cname not in valid_conditions:
                 continue
             path = os.path.join(cond, f"{cname}_reconstructed.csv")
             if not os.path.exists(path):
@@ -121,16 +128,24 @@ def segment(sig, seg_len, overlap):
 
 # Load recordings and build segment dataset (Z-score per raw recording)
 records = load_all_subjects(DATA_ROOT)
-print(f"Loaded {len(records)} recordings (Baseline vs Stroop)")
+print(f"Loaded {len(records)} recordings (Non-stress vs Stress)")
+
+# Replace old labeling logic
+CONDITION_LABEL = {
+    "baseline": 0,
+    "recovery": 0,
+    "mat": 1,
+    "stroop": 1
+}
 
 X, y, groups = [], [], []
 for s, c, sig in records:
-    sig = (sig - np.mean(sig)) / (np.std(sig) + 1e-8)  # per-record normalization
+    sig = (sig - np.mean(sig)) / (np.std(sig) + 1e-8)
     if len(sig) < SEGMENT_LEN:
         continue
     segs = segment(sig, SEGMENT_LEN, OVERLAP)
     X.extend(segs)
-    label = 0 if c == "baseline" else 1
+    label = CONDITION_LABEL.get(c, 0)
     y.extend([label] * len(segs))
     groups.extend([s] * len(segs))
 

@@ -1,37 +1,41 @@
 """
-CTBFNet: CNN + Transformer + BiLSTM with HRV Fusion for ECG Classification
+CTBFNet: CNN + Transformer + BiLSTM with HRV Fusion for ECG Stress Classification
+
+Stress vs Non-Stress Mapping:
+- Non-Stress (label 0): baseline, recovery
+- Stress     (label 1): mat, stroop
 
 Overview:
-- Loads multi-subject ECG CSVs (expects 'baseline' and 'stroop' conditions).
+- Loads multi-subject ECG CSVs (baseline / recovery / mat / stroop; any subset).
 - Segments ECG into overlapping fixed-length windows.
-- Extracts 41 HRV features per segment (time/frequency/nonlinear).
-- Encodes ECG with CNN -> Transformer -> BiLSTM and fuses HRV via FiLM and attention.
-- Trains with GroupKFold to avoid subject leakage.
+- Extracts 41 HRV features per segment (time / frequency / nonlinear).
+- Encodes ECG with CNN -> Transformer -> BiLSTM and fuses HRV via FiLM + cross-attention.
+- Trains with GroupKFold (subject-wise split to avoid leakage).
 - Tracks accuracy, F1, precision, recall, AUC, and computation metrics.
-- Saves per-fold outputs and final summary.
+- Saves per-fold checkpoints, histories, and final summary.
 
 Directory expectations:
 DATA_ROOT/
   └── <SubjectID>/
-      └── baseline/
-          └── baseline_reconstructed.csv
-      └── stroop/
-          └── stroop_reconstructed.csv
+      ├── baseline/baseline_reconstructed.csv    (optional)
+      ├── recovery/recovery_reconstructed.csv    (optional)
+      ├── mat/mat_reconstructed.csv              (optional)
+      └── stroop/stroop_reconstructed.csv        (optional)
 
-ECG CSVs must contain at least one column with name including "ecg" (case-insensitive).
+Label logic:
+  baseline -> 0
+  recovery -> 0
+  mat      -> 1
+  stroop   -> 1
 
-How to run (Windows, VS Code Terminal):
-1) Create/activate environment and install requirements:
-   pip install numpy pandas torch scikit-learn scipy matplotlib psutil
-2) Adjust DATA_ROOT and OUTPUT_ROOT as needed.
-3) Run:
-   python CTBFNet-GA.py
+Run (Windows):
+  pip install numpy pandas torch scikit-learn scipy matplotlib psutil
+  python CTBFNet-GA.py
 
 Notes:
-- SAMPLE_RATE should match your acquisition device (e.g., 130 Hz for Polar H10).
-- SEGMENT_LEN and OVERLAP control segmentation granularity.
-- NUM_HRV_FEATURES must equal the feature vector length produced in compute_hrv_features.
-- If you encounter issues with np.trapezoid, replace with np.trapz (NumPy version dependent).
+- SAMPLE_RATE must match acquisition (e.g., 130 Hz).
+- SEGMENT_LEN, OVERLAP control windowing granularity.
+- NUM_HRV_FEATURES must equal compute_hrv_features output length.
 """
 
 import os
@@ -85,22 +89,21 @@ process = psutil.Process(os.getpid())
 # ==========================================
 def load_all_subjects(root: str):
     """
-    Load ECG recordings from a directory structure organized by subject and condition.
+    Load ECG recordings organized by subject and condition.
 
-    Args:
-        root: Path to dataset root.
+    Supported conditions:
+        Non-Stress: baseline, recovery
+        Stress:     mat, stroop
 
     Returns:
         List of tuples (subject_id, condition, ecg_signal_np).
-        - condition should be one of ['baseline', 'stroop'] as filtered below.
-        - ecg_signal_np is a 1D float array.
     """
     records = []
     for subj in sorted(glob(os.path.join(root, "*"))):
         sid = os.path.basename(subj)
         for cond in sorted(glob(os.path.join(subj, "*"))):
             cname = os.path.basename(cond).lower()
-            if cname not in ["baseline", "stroop"]:
+            if cname not in ["baseline", "stroop", "mat", "recovery"]:
                 continue
             path = os.path.join(cond, f"{cname}_reconstructed.csv")
             if not os.path.exists(path):
@@ -137,7 +140,7 @@ def segment(sig: np.ndarray, seg_len: int, overlap: float):
 
 # Load and segment data (Z-score per recording)
 records = load_all_subjects(DATA_ROOT)
-print(f"Loaded {len(records)} recordings (Baseline vs Stroop)")
+print(f"Loaded {len(records)} recordings (Non-Stress vs Stress)")
 
 X, y, groups = [], [], []
 for s, c, sig in records:
@@ -146,7 +149,8 @@ for s, c, sig in records:
         continue
     segs = segment(sig, SEGMENT_LEN, OVERLAP)
     X.extend(segs)
-    label = 0 if c == "baseline" else 1
+    # Stress vs Non-Stress labeling
+    label = 0 if c in ["baseline", "recovery"] else 1
     y.extend([label] * len(segs))
     groups.extend([s] * len(segs))
 
