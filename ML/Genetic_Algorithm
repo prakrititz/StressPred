@@ -1,3 +1,26 @@
+"""
+Genetic Algorithm based feature selection pipeline for stress (binary) classification.
+
+Workflow:
+1. Load and clean dataset (HRV features).
+2. Map experimental condition to binary label.
+3. Impute missing values (median) and transform skewed columns (signed log1p).
+4. Robust scale all features.
+5. Run GA (DEAP) to select an optimal subset maximizing 5-fold CV accuracy (RandomForest).
+6. Evaluate multiple classifiers on GA-selected features.
+7. Generate convergence, diversity, feature frequency, ROC, PCA, t-SNE plots.
+8. Zip all plots for download (Colab environment assumption).
+
+Key Objects:
+- X_train_scaled / X_test_scaled: processed feature matrices.
+- selected_features: final GA subset.
+- results: performance summary per classifier.
+
+Notes:
+- Falls back to all features if GA selects none.
+- Population diversity computed via average pairwise Hamming distance.
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import RobustScaler
@@ -30,28 +53,32 @@ PLOT_DIR = "/content/ga_plots/"
 os.makedirs(PLOT_DIR, exist_ok=True)
 
 def save_plot(filename):
-    """Save current matplotlib figure into the plot folder."""
+    """Save current matplotlib figure into PLOT_DIR and close it."""
     plt.savefig(os.path.join(PLOT_DIR, filename), dpi=300, bbox_inches='tight')
     plt.close()
 
+# --------------------------------------------------------------------------
+# Data Loading & Cleaning
+# --------------------------------------------------------------------------
 df = pd.read_csv('/content/All_subjects_segments60.csv')
 
 drop_cols = ['Subject_ID','ApEn','scope','segment','SubjectID','SubjectName']
 df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
 
+# Map conditions to binary stress label
 df['label'] = df['condition'].map({
     'Baseline': 0, 'Recovery': 0,
     'Stroop': 1, 'MAT': 1
 })
 df = df.drop(columns=['condition'], errors='ignore')
 
+# Feature category definitions (filtered to those present)
 time_domain = [
     "AVNN_ms", "MEDIAN_RR_ms", "SDNN_ms", "RMSSD_ms", "SDSD_ms",
     "NN20", "pNN20_pct", "NN50", "pNN50_pct",
     "HR_mean_bpm", "HR_std_bpm", "HR_median_bpm",
     "IQR_RR_ms", "MAD_RR_ms", "CVNN", "CVSD"
 ]
-
 frequency_domain = [
     "VLF_ms2", "LF_ms2", "HF_ms2", "TP_ms2",
     "LF_nu", "HF_nu", "LF_HF", "HF_LF",
@@ -59,14 +86,13 @@ frequency_domain = [
     "VLF_pct", "LF_pct", "HF_pct",
     "fpeak_LF", "fpeak_HF", "fc_LF", "fc_HF"
 ]
-
 nonlinear = [
     "SD1_ms", "SD2_ms", "SD1_SD2_ratio",
     "SampEn", "HiguchiFD", "KURT"
 ]
-
 other_features = ["N", "SKEW", "TI"]
 
+# Keep only existing columns
 time_domain = [c for c in time_domain if c in df.columns]
 frequency_domain = [c for c in frequency_domain if c in df.columns]
 nonlinear = [c for c in nonlinear if c in df.columns]
@@ -84,12 +110,15 @@ print("Total categorized features:", len(all_expected_features))
 X = df.drop(columns=['label'])
 y = df['label'].astype(int)
 
+# Split preserving label distribution
 X_train_raw, X_test_raw, y_train, y_test = train_test_split(
     X, y, test_size=0.20, stratify=y, random_state=42
 )
-
 print(f"Train shape: {X_train_raw.shape}, Test shape: {X_test_raw.shape}")
 
+# --------------------------------------------------------------------------
+# Imputation & Skew Transformation
+# --------------------------------------------------------------------------
 imputer = SimpleImputer(strategy='median')
 X_train_imp = pd.DataFrame(imputer.fit_transform(X_train_raw), columns=X.columns)
 X_test_imp = pd.DataFrame(imputer.transform(X_test_raw), columns=X.columns)
@@ -99,6 +128,13 @@ skewed_cols = skewness[skewness.abs() > 1].index.tolist()
 print("Detected skewed columns (|skew| > 1):", skewed_cols)
 
 def sign_log1p_train_apply(train_series, test_series):
+    """
+    Apply signed log1p transform using train statistics implicitly.
+
+    For each value v:
+        transformed = sign(v) * log1p(|v|)
+    Keeps negative sign information, reduces right/left skew.
+    """
     tr = train_series.copy()
     te = test_series.copy()
     tr_trans = np.sign(tr) * np.log1p(np.abs(tr))
@@ -111,6 +147,7 @@ for col in skewed_cols:
         X_train_imp[col] = tr_col
         X_test_imp[col] = te_col
 
+# Robust scaling (less sensitive to outliers)
 scaler = RobustScaler()
 X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train_imp), columns=X.columns)
 X_test_scaled = pd.DataFrame(scaler.transform(X_test_imp), columns=X.columns)
@@ -118,6 +155,10 @@ X_test_scaled = pd.DataFrame(scaler.transform(X_test_imp), columns=X.columns)
 X_full = X_train_scaled.copy()
 n_features = X_full.shape[1]
 
+# --------------------------------------------------------------------------
+# GA Setup (DEAP)
+# --------------------------------------------------------------------------
+# Reset creators if re-running in interactive session
 if "FitnessMax" in creator.__dict__:
     del creator.FitnessMax
 if "Individual" in creator.__dict__:
@@ -132,6 +173,14 @@ toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.att
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 def eval_individual(individual):
+    """
+    Evaluate an individual's feature subset via 5-fold CV accuracy (RandomForest).
+
+    Returns:
+        (accuracy,) tuple for DEAP Fitness.
+    Edge case:
+        If no feature selected, returns 0.0 to penalize empty subset.
+    """
     if sum(individual) == 0:
         return 0.0,
     selected_cols = [X_full.columns[i] for i in range(n_features) if individual[i] == 1]
@@ -145,19 +194,24 @@ toolbox.register("mate", tools.cxTwoPoint)
 toolbox.register("mutate", tools.mutFlipBit, indpb=0.15)
 toolbox.register("select", tools.selTournament, tournsize=3)
 
+# Hyperparameters of GA
 pop = toolbox.population(n=60)
 hof_main = tools.HallOfFame(1)
 NGEN = 20
 
+# Tracking lists
 best_train_fitness = []
 avg_fitness = []
 median_fitness = []
 worst_fitness = []
 best_test_accuracy = []
 population_diversity = []
-feature_selection_history = []
+feature_selection_history = []  # (optional extension)
 feature_frequency_population = np.zeros(n_features, dtype=int)
 
+# --------------------------------------------------------------------------
+# GA Evolution Loop
+# --------------------------------------------------------------------------
 for gen in range(NGEN):
     offspring = algorithms.varAnd(pop, toolbox, cxpb=0.6, mutpb=0.3)
     fits = list(map(toolbox.evaluate, offspring))
@@ -176,9 +230,9 @@ for gen in range(NGEN):
     median_fitness.append(np.median(fitness_values))
     worst_fitness.append(np.min(fitness_values))
 
+    # Diversity (average normalized Hamming distance)
     pop_matrix = np.array([np.array(ind, dtype=int) for ind in pop])
     pop_size = len(pop_matrix)
-
     if pop_size > 1:
         d = []
         for i in range(pop_size):
@@ -192,7 +246,7 @@ for gen in range(NGEN):
 
     chosen_cols = [X_full.columns[i] for i in range(n_features) if best_ind[i] == 1]
     if len(chosen_cols) == 0:
-        chosen_cols = X_full.columns.tolist()
+        chosen_cols = X_full.columns.tolist()  # fallback
 
     Xtr_sel = X_train_scaled[chosen_cols].values
     Xte_sel = X_test_scaled[chosen_cols].values
@@ -204,6 +258,9 @@ for gen in range(NGEN):
 
     print(f"Gen {gen+1}/{NGEN} | Best = {best_fit:.4f} | Avg = {avg_fitness[-1]:.4f} | Med = {median_fitness[-1]:.4f} | Worst = {worst_fitness[-1]:.4f}")
 
+# --------------------------------------------------------------------------
+# Post-GA: Selected Features & Model Evaluation
+# --------------------------------------------------------------------------
 best_ind = hof_main[0]
 selected_features = [X_full.columns[i] for i in range(n_features) if best_ind[i] == 1]
 print("\nSelected GA Features:")
@@ -214,6 +271,7 @@ if len(selected_features) == 0:
 X_train_sel = X_train_scaled[selected_features].values
 X_test_sel  = X_test_scaled[selected_features].values
 
+# Classifiers for comparison
 classifiers = {
     "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
     "KNN": KNeighborsClassifier(),
@@ -230,6 +288,7 @@ classifiers = {
 results = []
 fitted_classifiers = {}
 
+# Loop over models
 for name, clf in classifiers.items():
     print(f"\n===================== {name} =====================")
     clf.fit(X_train_sel, y_train)
@@ -269,6 +328,9 @@ df_res = pd.DataFrame(results)
 print("\n=================== FINAL TEST RESULTS (20% UNSEEN) ===================")
 print(df_res)
 
+# --------------------------------------------------------------------------
+# Plot Generation & Export
+# --------------------------------------------------------------------------
 plt.figure(figsize=(8,6))
 plt.plot(best_train_fitness, marker='o', label="Best")
 plt.plot(avg_fitness, marker='s', label="Average")
@@ -306,6 +368,7 @@ nl_present   = [c for c in nonlinear if c in feature_freq_series.index]
 ga_selected_set = set(selected_features)
 
 def make_colors(feature_list):
+    """Return list of colors highlighting GA selected features (blue) vs non-selected (gray)."""
     return ["tab:blue" if feat in ga_selected_set else "lightgray" for feat in feature_list]
 
 fig, axes = plt.subplots(3, 1, figsize=(14, 16), constrained_layout=True)
@@ -341,6 +404,7 @@ plt.legend()
 plt.grid(True)
 save_plot("roc_curve_overlay.png")
 
+# Dimensionality reduction (visual separability)
 pca = PCA(n_components=2, random_state=42)
 pca_before = pca.fit_transform(X_train_scaled.values)
 plt.figure(figsize=(7,5))
@@ -368,8 +432,10 @@ plt.scatter(tsne_after[:,0], tsne_after[:,1], c=y_train, cmap='coolwarm', s=10)
 plt.title("t-SNE - After GA")
 save_plot("tsne_after_ga.png")
 
+# --------------------------------------------------------------------------
+# Zip & Download (Colab)
+# --------------------------------------------------------------------------
 zip_path = "/content/GA_PLOTS.zip"
-
 with zipfile.ZipFile(zip_path, "w") as zf:
     for root, _, files in os.walk(PLOT_DIR):
         for f in files:
