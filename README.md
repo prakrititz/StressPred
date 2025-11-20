@@ -28,10 +28,3 @@ The dataset consists of raw ECG signals collected using a consumer-grade wearabl
     3.  **Mental Arithmetic Task (MAT):** Cognitive load/Severe stress (5 mins).
     4.  **Recovery:** Resting state (5 mins).
 
-## 3. Repository Structure
-```text
-/
-├── main_pipeline.py        # End-to-end training script (Preprocessing -> GA -> Model)
-├── requirements.txt        # Python dependencies
-├── README.md               # This file
-└── Sample_Data_n5.zip      # Zipped subset of 5 participants (Unzip before use)
