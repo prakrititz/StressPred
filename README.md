@@ -6,6 +6,7 @@ This repository contains the source code and a representative dataset subset sup
 **Current Status: Anonymized Review Subset (n=5)**
 
 The full dataset collected for this study comprises **51 participants** (~1 GB of data). Due to the file size limits of the repository and to maintain the integrity of the double-blind review process, we have uploaded a **Representative Subset** containing data for **First 5 participants**.
+**Full dataset used is not uploaded**
 
 The folder `Sample_Data_n5` contains:
 * **Subjects:** 5 Participants (Anonymized IDs).
