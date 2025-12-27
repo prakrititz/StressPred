@@ -18,7 +18,7 @@ The complete dataset (51 participants) will be made publicly available upon acce
 
 **For Reviewers:** If access to the full cohort data is strictly required for validation during the review process, please request it through the **Conference Program Chair** or **Area Chair**. This protocol ensures that the authors' identities remain concealed, preserving the double-blind nature of the review.
 
-**\nFull dataset used is now uploaded**
+**Full dataset used is now uploaded**
 
 ## 2. Data Description
 The dataset consists of raw ECG signals collected using a consumer-grade wearable device.
