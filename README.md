@@ -23,9 +23,9 @@ The complete dataset (51 participants) will be made publicly available upon acce
 ## 2. Data Description
 The dataset consists of raw ECG signals collected using a consumer-grade wearable device.
 
-* [cite_start]**Acquisition Device:** Polar H10 Chest Strap[cite: 92].
-* [cite_start]**Sampling Rate:** Signals were reconstructed from packets and interpolated to a uniform **130 Hz**.
-* [cite_start]**Protocol:** The data is labeled according to a standardized four-phase protocol:
+* **Acquisition Device:** Polar H10 Chest Strap.
+* **Sampling Rate:** Signals were reconstructed from packets and interpolated to a uniform **130 Hz**.
+* **Protocol:** The data is labeled according to a standardized four-phase protocol:
     1.  **Baseline:** Eyes-open resting state (5 mins).
     2.  **Stroop Task:** Cognitive load/Mild stress (5 mins).
     3.  **Mental Arithmetic Task (MAT):** Cognitive load/Severe stress (5 mins).
