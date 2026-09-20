@@ -31,3 +31,35 @@ The dataset consists of raw ECG signals collected using a consumer-grade wearabl
     3.  **Mental Arithmetic Task (MAT):** Cognitive load/Severe stress (5 mins).
     4.  **Recovery:** Resting state (5 mins).
 
+## License
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+Copyright © 2026 Abu Saleh Khan, Areen Patil, Nipun Verma, Prakrititz Borah, Sakshi Arora.
+
+This dataset is made available under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0).
+
+You are free to:
+
+* Share — copy and redistribute the material in any medium or format.
+* Adapt — remix, transform, and build upon the material.
+
+Under the following terms:
+
+* Attribution — You must give appropriate credit, provide a link to the license, and indicate if changes were made.
+* NonCommercial — You may not use the material for commercial purposes.
+* No additional restrictions — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
+
+## Citation
+
+If you use this dataset in academic research, publications, presentations, or other scholarly work, please cite the following paper:
+
+Khan, A.S., Patil, A.R., Verma, N., Borah, P. and Arora, S. (2026). **Stress Detection from Consumer-Grade ECG Device Using GA Optimization and Segment-Wise Analysis**. In *Proceedings of the 19th International Joint Conference on Biomedical Engineering Systems and Technologies - BIOSIGNALS*; ISBN 978-989-758-802-0; ISSN 2184-4305, SciTePress, pp. 160–171. DOI: 10.5220/0014487500004070.
+
+## Dataset Attribution
+
+When using this dataset, please acknowledge the authors and cite the above publication.
+
+The dataset is provided for academic and research purposes under the terms specified in the accompanying license. Users are responsible for ensuring that their use of the dataset complies with applicable ethical, privacy, and institutional requirements.
+
+For the full license terms, see:
+https://creativecommons.org/licenses/by-nc/4.0/
